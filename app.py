@@ -11,22 +11,20 @@ from pathlib import Path
 import qrcode
 from flask import (Flask, Response, abort, redirect, render_template_string,
                    request, send_from_directory, session, url_for)
+from werkzeug.security import generate_password_hash, check_password_hash
 
 BASE = Path(__file__).parent
 DATOS = BASE / "datos"
 DATOS.mkdir(exist_ok=True)
 
 ARCHIVO = DATOS / "carnets.json"
+USUARIOS_ARCHIVO = DATOS / "usuarios.json"
 FOTOS = DATOS / "fotos"
 FOTOS.mkdir(exist_ok=True)
 LOGO = DATOS / "logo.png"
 FIRMA = DATOS / "firma.png"
 AJUSTES_ARCHIVO = DATOS / "ajustes.json"
 
-# Contraseña del panel. Cámbiala aquí o con la variable de entorno ADMIN_PASSWORD.
-ADMIN_USER = os.environ.get("ADMIN_USER", "Elpope")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "popeye26")
-# Dirección pública para los QR. Si la dejas vacía, usa la dirección desde donde abras el panel.
 BASE_URL = os.environ.get("BASE_URL", "").rstrip("/")
 ENTIDAD = "Municipalidad de Villa El Salvador"
 
@@ -34,13 +32,12 @@ DEFECTO = {
     "entidad": ENTIDAD,
     "titulo": "Verificación de carnet de sanidad",
     "pie": "Los datos mostrados deben coincidir con el carnet físico.",
-    "marca_opacidad": 12,   # 0 a 40 (%)
-    "marca_tamano": 70,     # 20 a 150
-    "marca_posicion": 50,   # 0 (arriba) a 100 (abajo)
-    "marca_carnet": False,  # mostrar también en el carnet impreso
-    "carnet_entidad": "MUNICIPALIDAD DISTRITAL DE VILLA EL SALVADOR",  # texto sobre la firma
+    "marca_opacidad": 12,
+    "marca_tamano": 70,
+    "marca_posicion": 50,
+    "marca_carnet": False,
+    "carnet_entidad": "MUNICIPALIDAD DISTRITAL DE VILLA EL SALVADOR",
 }
-
 
 def cargar_ajustes():
     a = dict(DEFECTO)
@@ -49,14 +46,25 @@ def cargar_ajustes():
             a.update(json.load(f))
     return a
 
+def cargar_usuarios():
+    if not USUARIOS_ARCHIVO.exists():
+        # Crear usuario por defecto si no existe
+        default = {"admin": generate_password_hash("admin123")}
+        with open(USUARIOS_ARCHIVO, "w", encoding="utf-8") as f:
+            json.dump(default, f)
+        return default
+    with open(USUARIOS_ARCHIVO, encoding="utf-8") as f:
+        return json.load(f)
+
+def guardar_usuarios(usuarios):
+    with open(USUARIOS_ARCHIVO, "w", encoding="utf-8") as f:
+        json.dump(usuarios, f)
 
 def vista(plantilla, **kw):
     return render_template_string(plantilla, a=cargar_ajustes(), logo=LOGO.exists(), **kw)
 
-
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY") or hashlib.sha256(
-    (ADMIN_PASSWORD + "carnets-sanidad").encode()).hexdigest()
+app.secret_key = os.environ.get("SECRET_KEY", "llave-maestra-carnets-2026")
 
 CSS = """
 :root{--bg:#f3f6f4;--card:#fff;--ink:#16302b;--mute:#5d716c;--line:#d6e0dc;--ok:#1b7a4b;--okbg:#e2f3ea;--bad:#a63232;--badbg:#f8e4e4;--acc:#1b7a4b}
@@ -79,6 +87,66 @@ dt{color:var(--mute);font-size:.9rem}
 dd{margin:0;font-weight:bold;text-align:right}
 .foot{margin-top:14px;text-align:center;color:var(--mute);font-size:.8rem}
 """
+
+LOGIN = """<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Iniciar Sesión</title><style>""" + CSS + """
+main{max-width:350px;margin-top:10vh}
+form{display:flex;flex-direction:column;gap:12px}
+label{font-size:.9rem;color:var(--mute);display:flex;flex-direction:column;gap:4px}
+input{padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);font:inherit}
+button{background:var(--acc);color:#fff;border:0;border-radius:6px;padding:12px;font:inherit;cursor:pointer;font-weight:bold}
+.err{background:var(--badbg);color:var(--bad);padding:10px;border-radius:6px;margin-bottom:14px;font-size:.9rem;text-align:center}
+</style></head><body><main>
+<div class="card">
+<header><h1 style="margin:0">Acceso al Panel</h1><p style="margin-top:6px">{{ a.entidad }}</p></header>
+{% if error %}<div class="err">{{ error }}</div>{% endif %}
+<form method="post">
+<label>Usuario<input name="usuario" required autofocus></label>
+<label>Contraseña<input type="password" name="clave" required></label>
+<button type="submit">Ingresar</button>
+</form>
+</div></main></body></html>"""
+
+USUARIOS_TMPL = """<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gestión de Usuarios</title><style>""" + CSS + """
+main{max-width:650px}
+input{padding:9px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);font:inherit;width:100%}
+button,.btn{background:var(--acc);color:#fff;border:0;border-radius:6px;padding:10px 16px;font:inherit;cursor:pointer;text-decoration:none;display:inline-block}
+table{width:100%;border-collapse:collapse;margin-top:10px;font-size:.9rem;background:var(--card);border-radius:10px;overflow:hidden;border:1px solid var(--line)}
+th,td{text-align:left;padding:12px;border-bottom:1px solid var(--line)}
+th{background:var(--bg)}
+a{color:var(--acc)}
+.msg{background:var(--okbg);color:var(--ok);padding:10px;border-radius:6px;margin-bottom:14px}
+form.f{display:grid;grid-template-columns:1fr 1fr auto;gap:12px;align-items:end}
+@media(max-width:500px){form.f{grid-template-columns:1fr}}
+</style></head><body><main>
+<header><p>{{ a.entidad }}</p><h1>Gestión de Usuarios</h1><p><a href="{{ url_for('admin') }}">← Volver al panel</a></p></header>
+{% if msg %}<div class="msg">{{ msg }}</div>{% endif %}
+<div class="card">
+<h2 style="margin-top:0">Crear o editar usuario</h2>
+<p class="foot" style="text-align:left;margin-top:0">Para cambiar la contraseña de un usuario existente, escribe su nombre y la nueva contraseña.</p>
+<form class="f" method="post">
+<label>Usuario (minúsculas)<input name="usuario" required pattern="[a-zA-Z0-9_]+" title="Solo letras y números sin espacios"></label>
+<label>Contraseña<input type="password" name="clave" required></label>
+<button type="submit">Guardar</button>
+</form>
+</div>
+<h2 style="margin-top:24px">Cuentas registradas</h2>
+<table><tr><th>Nombre de usuario</th><th>Acciones</th></tr>
+{% for u in usuarios %}
+<tr><td><b>{{ u }}</b> {% if u == session.usuario %}<span style="color:var(--mute);font-size:.8rem">(Tú)</span>{% endif %}</td>
+<td style="width:100px">
+  {% if u != session.usuario %}
+  <form method="post" action="{{ url_for('eliminar_usuario', usuario=u) }}" style="display:inline" onsubmit="return confirm('¿Eliminar al usuario {{ u }}?')">
+  <button style="background:var(--bad);padding:6px 12px;font-size:.8rem">Eliminar</button>
+  </form>
+  {% endif %}
+</td></tr>
+{% endfor %}
+</table>
+</main></body></html>"""
 
 PAGINA = """<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -114,7 +182,6 @@ main{position:relative;z-index:1}
 {% endif %}
 </div><p class="foot">{{ a.pie }}</p></main></body></html>"""
 
-
 FORM_CAMPOS = """
 <label>Apellidos<input name="apellidos" value="{{ v.apellidos }}" required></label>
 <label>Nombres<input name="nombres" value="{{ v.nombres }}" required></label>
@@ -144,8 +211,17 @@ th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line)}
 a{color:var(--acc)}
 h2{margin:26px 0 10px;font-size:1.1rem}
 .msg{background:var(--okbg);color:var(--ok);padding:10px;border-radius:6px;margin-bottom:14px}
+.nav{display:flex;gap:15px;justify-content:center;margin-top:12px;font-size:.95rem;flex-wrap:wrap}
 </style></head><body><main>
-<header><p>{{ a.entidad }}</p><h1>Panel de carnets de sanidad</h1><p style="margin-top:8px"><a href="{{ url_for('ajustes') }}">⚙ Ajustes, logo y marca de agua</a></p></header>
+<header>
+  <p>{{ a.entidad }}</p>
+  <h1>Panel de carnets de sanidad</h1>
+  <div class="nav">
+    <a href="{{ url_for('ajustes') }}">⚙ Ajustes y Logos</a>
+    <a href="{{ url_for('usuarios_panel') }}">👥 Usuarios</a>
+    <a href="{{ url_for('logout') }}" style="color:var(--bad)">🚪 Salir</a>
+  </div>
+</header>
 {% if msg %}<div class="msg">{{ msg }}</div>{% endif %}
 <div class="card">
 <h2 style="margin-top:0">Nuevo carnet</h2>
@@ -169,7 +245,6 @@ h2{margin:26px 0 10px;font-size:1.1rem}
 <td style="white-space:nowrap"><a href="{{ url_for('carnet', codigo=k) }}">Carnet / descargar</a> · <a href="{{ url_for('ver_carnet', codigo=k, previa=1) }}">Ver página</a> · <a href="{{ url_for('editar', codigo=k) }}">Editar</a></td></tr>
 {% endfor %}</table></div>
 </main></body></html>"""
-
 
 EDITAR = """<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -258,8 +333,7 @@ body{margin:0;background:#e9e9e9;font-family:Arial,sans-serif;color:#111}
 <div class="hoja"><img src="{{ url_for('carnet_png', codigo=codigo) }}?v={{ ver }}" alt="Carnet {{ codigo }}"></div>
 </body></html>"""
 
-
-# ---------------- Imagen del carnet (misma disposición que el modelo de Canva) ----------------
+# ---------------- Imagen del carnet ----------------
 ANCHO, ALTO = 1200, 1660
 TEXTO = (25, 25, 25)
 
@@ -274,7 +348,6 @@ F_NEG = ["C:/Windows/Fonts/timesbd.ttf", "C:/Windows/Fonts/georgiab.ttf",
          "/usr/share/fonts/truetype/liberation2/LiberationSerif-Bold.ttf",
          "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf", "DejaVuSerif-Bold.ttf"]
 
-
 def fuente(rutas, tam):
     from PIL import ImageFont
     for r in rutas:
@@ -284,16 +357,13 @@ def fuente(rutas, tam):
             continue
     return ImageFont.load_default()
 
-
 def texto(d, x, y, t, f, sep=0, centro=False, fill=TEXTO):
-    """Dibuja texto con separación entre letras. y = centro vertical del texto."""
     ancho = sum(d.textlength(c, font=f) for c in t) + sep * (len(t) - 1)
     if centro:
         x -= ancho / 2
     for c in t:
         d.text((x, y), c, font=f, fill=fill, anchor="lm")
         x += d.textlength(c, font=f) + sep
-
 
 def pegar_centrado(lienzo, img, cx, cy, caja_w, caja_h):
     from PIL import Image
@@ -302,12 +372,10 @@ def pegar_centrado(lienzo, img, cx, cy, caja_w, caja_h):
     img = img.resize((max(1, int(img.width * esc)), max(1, int(img.height * esc))), Image.LANCZOS)
     lienzo.alpha_composite(img, (int(cx - img.width / 2), int(cy - img.height / 2)))
 
-
 def dibujar_carnet(codigo, r, a, url_qr):
     from PIL import Image, ImageDraw
     lienzo = Image.new("RGBA", (ANCHO, ALTO), "white")
 
-    # marca de agua opcional
     if LOGO.exists() and a.get("marca_carnet"):
         wm = Image.open(LOGO).convert("RGBA")
         esc = ANCHO * a["marca_tamano"] / 100 / wm.width
@@ -320,11 +388,9 @@ def dibujar_carnet(codigo, r, a, url_qr):
     if LOGO.exists():
         pegar_centrado(lienzo, Image.open(LOGO), 600, 112, 520, 205)
 
-    # líneas y título
     d.line([(138, 258), (1081, 258)], fill=(70, 70, 70), width=2)
     texto(d, 600, 292, "CARNET DE SANIDAD", fuente(F_REG, 31), sep=4.5, centro=True)
 
-    # datos de la persona
     f_lab, f_val = fuente(F_REG, 23), fuente(F_NEG, 32)
     filas = [("APELLIDOS", r["apellidos"], 416, 448), ("NOMBRES", r["nombres"], 488, 524),
              ("D.N.I", r["dni"], 566, 596), ("GRUPO SANGUÍNEO", r.get("grupo", ""), 628, 662),
@@ -333,14 +399,12 @@ def dibujar_carnet(codigo, r, a, url_qr):
         texto(d, 198, ye, etiqueta, f_lab, sep=2.6)
         texto(d, 240, yv, valor, f_val)
 
-    # QR único de la persona
     qr_buf = io.BytesIO()
     qrcode.make(url_qr).save(qr_buf, format="PNG")
     qr_buf.seek(0)
     qr = Image.open(qr_buf).convert("RGB").resize((196, 196), Image.NEAREST)
     lienzo.paste(qr, (884, 408))
 
-    # foto
     fx, fy, fw, fh = 552, 667, 202, 232
     if r.get("foto") and (FOTOS / r["foto"]).exists():
         ft = Image.open(FOTOS / r["foto"]).convert("RGB")
@@ -352,28 +416,23 @@ def dibujar_carnet(codigo, r, a, url_qr):
         d.rectangle([fx, fy, fx + fw, fy + fh], outline=(190, 190, 190), width=2)
         texto(d, fx + fw / 2, fy + fh / 2, "FOTO", fuente(F_REG, 26), centro=True, fill=(170, 170, 170))
 
-    # condición
     texto(d, 653, 957, "CONDICIÓN", fuente(F_REG, 20), sep=1.8, centro=True)
     texto(d, 653, 992, r["condicion"], fuente(F_NEG, 38), centro=True)
 
-    # fechas
     d.line([(159, 1044), (1106, 1044)], fill=(70, 70, 70), width=2)
     f_fecha = fuente(F_REG, 30)
     texto(d, 184, 1092, "Fecha: " + datetime.strptime(r["emision"], "%Y-%m-%d").strftime("%d-%m-%Y"), f_fecha)
     texto(d, 184, 1128, "Expira: " + datetime.strptime(r["vence"], "%Y-%m-%d").strftime("%d-%m-%Y"), f_fecha)
 
-    # entidad y firma
     texto(d, 667, 1212, a["carnet_entidad"].upper(), fuente(F_REG, 23), sep=1.2, centro=True)
     if FIRMA.exists():
         pegar_centrado(lienzo, Image.open(FIRMA), 625, 1377, 360, 225)
     return lienzo.convert("RGB")
 
-
 def png_bytes(img):
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
-
 
 def imagen_de(codigo):
     r = cargar().get(codigo)
@@ -381,22 +440,18 @@ def imagen_de(codigo):
         abort(404)
     return r, dibujar_carnet(codigo, r, cargar_ajustes(), f"{base_publica()}/c/{codigo}")
 
-
 def cargar():
     if not ARCHIVO.exists():
         return {}
     with open(ARCHIVO, encoding="utf-8") as f:
         return json.load(f)
 
-
 def guardar(datos):
     with open(ARCHIVO, "w", encoding="utf-8") as f:
         json.dump(datos, f, ensure_ascii=False, indent=2)
 
-
 def fmt(iso):
     return datetime.strptime(iso, "%Y-%m-%d").strftime("%d/%m/%Y")
-
 
 def siguiente_codigo(datos):
     n = 0
@@ -405,40 +460,23 @@ def siguiente_codigo(datos):
             n = max(n, int(k[1:]))
     return f"C{n + 1:04d}"
 
-
 def mas_un_anio(iso):
     d = datetime.strptime(iso, "%Y-%m-%d").date()
     try:
         return d.replace(year=d.year + 1).isoformat()
-    except ValueError:  # 29 de febrero
+    except ValueError:
         return d.replace(year=d.year + 1, day=28).isoformat()
-
-
-def pedir_clave():
-    return Response("Acceso restringido", 401,
-                    {"WWW-Authenticate": 'Basic realm="Panel de carnets"'})
-
-
-def autorizado():
-    a = request.authorization
-    return bool(a and secrets.compare_digest(a.username or "", ADMIN_USER)
-                and secrets.compare_digest(a.password or "", ADMIN_PASSWORD))
-
 
 @app.before_request
 def proteger():
-    if autorizado():
-        session["admin"] = True  # solo el médico: así ve la barra de enlaces en la página
-    publicas = ("ver_carnet", "logo")
-    if request.endpoint in publicas or request.endpoint == "static":
+    publicas = ("ver_carnet", "logo", "qr_png", "login", "static")
+    if request.endpoint in publicas:
         return None
-    if not autorizado():
-        return pedir_clave()
-
+    if not session.get("usuario"):
+        return redirect(url_for("login"))
 
 def base_publica():
     return BASE_URL or request.host_url.rstrip("/")
-
 
 def registrar(datos, f, foto=None):
     codigo = siguiente_codigo(datos)
@@ -458,6 +496,49 @@ def registrar(datos, f, foto=None):
     }
     return codigo
 
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    error = ""
+    if request.method == "POST":
+        usuario = request.form.get("usuario", "").strip().lower()
+        clave = request.form.get("clave", "")
+        usuarios = cargar_usuarios()
+        
+        if usuario in usuarios and check_password_hash(usuarios[usuario], clave):
+            session["usuario"] = usuario
+            session["admin"] = True
+            return redirect(url_for("admin"))
+        else:
+            error = "Usuario o contraseña incorrectos."
+    
+    return vista(LOGIN, error=error)
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+@app.route("/usuarios", methods=["GET", "POST"])
+def usuarios_panel():
+    msg = ""
+    usuarios = cargar_usuarios()
+    if request.method == "POST":
+        nuevo_user = request.form.get("usuario", "").strip().lower()
+        nueva_clave = request.form.get("clave", "")
+        if nuevo_user and nueva_clave:
+            usuarios[nuevo_user] = generate_password_hash(nueva_clave)
+            guardar_usuarios(usuarios)
+            msg = f"Contraseña guardada para el usuario '{nuevo_user}'."
+    
+    return vista(USUARIOS_TMPL, msg=msg, usuarios=sorted(usuarios.keys()), session=session)
+
+@app.route("/usuarios/eliminar/<usuario>", methods=["POST"])
+def eliminar_usuario(usuario):
+    usuarios = cargar_usuarios()
+    if usuario in usuarios and usuario != session.get("usuario"):
+        del usuarios[usuario]
+        guardar_usuarios(usuarios)
+    return redirect(url_for("usuarios_panel"))
 
 @app.route("/c/<codigo>")
 def ver_carnet(codigo):
@@ -471,7 +552,6 @@ def ver_carnet(codigo):
              vigente=r["condicion"] == "APTO" and date.today() <= vence)
     return vista(PAGINA, c=type("C", (), d), previa=bool(session.get("admin")) and not request.args.get("publica"), codigo=codigo.upper())
 
-
 @app.route("/")
 @app.route("/admin")
 def admin():
@@ -484,7 +564,6 @@ def admin():
     vacio["emision"] = date.today().isoformat()
     return vista(ADMIN, filas=filas, total=len(datos), q=q, v=vacio,
                  msg=request.args.get("msg", ""))
-
 
 @app.route("/nuevo", methods=["POST"])
 def nuevo():
@@ -500,7 +579,6 @@ def nuevo():
     codigo = registrar(datos, request.form, nombre_foto)
     guardar(datos)
     return redirect(url_for("ver_carnet", codigo=codigo, previa=1))
-
 
 @app.route("/editar/<codigo>", methods=["GET", "POST"])
 def editar(codigo):
@@ -533,7 +611,6 @@ def editar(codigo):
                                    "condicion", "emision", "vence", "medico", "foto")}
     return vista(EDITAR, v=v, codigo=codigo)
 
-
 @app.route("/eliminar/<codigo>", methods=["POST"])
 def eliminar(codigo):
     codigo = codigo.upper()
@@ -543,7 +620,6 @@ def eliminar(codigo):
         (FOTOS / r["foto"]).unlink(missing_ok=True)
     guardar(datos)
     return redirect(url_for("admin", msg=f"Carnet {codigo} eliminado"))
-
 
 @app.route("/ajustes", methods=["GET", "POST"])
 def ajustes():
@@ -573,7 +649,6 @@ def ajustes():
         msg = "Ajustes guardados"
     return vista(AJUSTES, msg=msg, firma=FIRMA.exists(), ver=int(LOGO.stat().st_mtime) if LOGO.exists() else 0)
 
-
 @app.route("/importar", methods=["POST"])
 def importar():
     archivo = request.files.get("archivo")
@@ -593,14 +668,12 @@ def importar():
     guardar(datos)
     return redirect(url_for("admin", msg=f"Se importaron {n} carnets"))
 
-
 @app.route("/plantilla.csv")
 def plantilla():
     cuerpo = ("apellidos,nombres,dni,grupo,pulmones,vdrl,condicion,emision,vence,medico\n"
               "ESPINOZA SOSA,PEDRO ANTONIO,12345678,RH +,NEGATIVO,NO REACTIVO,APTO,2026-11-04,2027-11-10,\n")
     return Response(cuerpo, mimetype="text/csv",
                     headers={"Content-Disposition": "attachment; filename=plantilla_carnets.csv"})
-
 
 @app.route("/carnet/<codigo>")
 def carnet(codigo):
@@ -611,7 +684,6 @@ def carnet(codigo):
                   AJUSTES_ARCHIVO.stat().st_mtime if AJUSTES_ARCHIVO.exists() else 0))
     return vista(CARNET, codigo=codigo, ver=ver)
 
-
 @app.route("/carnet/<codigo>/imagen.png")
 def carnet_png(codigo):
     codigo = codigo.upper()
@@ -621,7 +693,6 @@ def carnet_png(codigo):
         cab["Content-Disposition"] = f"attachment; filename=carnet_{codigo}.png"
     return Response(png_bytes(img), mimetype="image/png", headers=cab)
 
-
 @app.route("/carnet/<codigo>/carnet.pdf")
 def carnet_pdf(codigo):
     codigo = codigo.upper()
@@ -630,7 +701,6 @@ def carnet_pdf(codigo):
     img.save(buf, format="PDF", resolution=150.0)
     return Response(buf.getvalue(), mimetype="application/pdf",
                     headers={"Content-Disposition": f"attachment; filename=carnet_{codigo}.pdf"})
-
 
 @app.route("/carnets.zip")
 def carnets_zip():
@@ -643,7 +713,6 @@ def carnets_zip():
     return Response(buf.getvalue(), mimetype="application/zip",
                     headers={"Content-Disposition": "attachment; filename=carnets.zip"})
 
-
 @app.route("/qr/<codigo>.png")
 def qr_png(codigo):
     codigo = codigo.upper()
@@ -653,18 +722,15 @@ def qr_png(codigo):
     qrcode.make(f"{base_publica()}/c/{codigo}").save(buf, format="PNG")
     return Response(buf.getvalue(), mimetype="image/png")
 
-
 @app.route("/logo.png")
 def logo():
     if not LOGO.exists():
         abort(404)
     return send_from_directory(DATOS, "logo.png")
 
-
 @app.route("/fotos/<nombre>")
 def foto(nombre):
     return send_from_directory(FOTOS, nombre)
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
