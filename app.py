@@ -48,15 +48,37 @@ def cargar_ajustes():
 
 def cargar_usuarios():
     if not USUARIOS_ARCHIVO.exists():
-        # Crear usuario por defecto si no existe
-        default = {"elpope": generate_password_hash("popeye26")}
+        default = {"admin": {"clave": generate_password_hash("admin123"), "ajustes": True, "usuarios": True}}
         with open(USUARIOS_ARCHIVO, "w", encoding="utf-8") as f:
             json.dump(default, f)
         return default
+        
     with open(USUARIOS_ARCHIVO, encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+        
+    # Migración automática al nuevo sistema de permisos por si hay usuarios antiguos
+    migrado = False
+    for k, v in list(data.items()):
+        if isinstance(v, str): 
+            data[k] = {"clave": v, "ajustes": (k == "admin"), "usuarios": (k == "admin")}
+            migrado = True
+            
+    # Proteger al admin principal
+    if "admin" not in data:
+        data["admin"] = {"clave": generate_password_hash("admin123"), "ajustes": True, "usuarios": True}
+        migrado = True
+        
+    if migrado:
+        guardar_usuarios(data)
+        
+    return data
 
 def guardar_usuarios(usuarios):
+    # Blindaje extra: asegurar que admin siempre tenga todos los permisos
+    if "admin" in usuarios:
+        usuarios["admin"]["ajustes"] = True
+        usuarios["admin"]["usuarios"] = True
+        
     with open(USUARIOS_ARCHIVO, "w", encoding="utf-8") as f:
         json.dump(usuarios, f)
 
@@ -119,26 +141,32 @@ th,td{text-align:left;padding:12px;border-bottom:1px solid var(--line)}
 th{background:var(--bg)}
 a{color:var(--acc)}
 .msg{background:var(--okbg);color:var(--ok);padding:10px;border-radius:6px;margin-bottom:14px}
-form.f{display:grid;grid-template-columns:1fr 1fr auto;gap:12px;align-items:end}
+form.f{display:grid;grid-template-columns:1fr 1fr;gap:15px;align-items:end}
 @media(max-width:500px){form.f{grid-template-columns:1fr}}
 </style></head><body><main>
 <header><p>{{ a.entidad }}</p><h1>Gestión de Usuarios</h1><p><a href="{{ url_for('admin') }}">← Volver al panel</a></p></header>
 {% if msg %}<div class="msg">{{ msg }}</div>{% endif %}
 <div class="card">
 <h2 style="margin-top:0">Crear o editar usuario</h2>
-<p class="foot" style="text-align:left;margin-top:0">Para cambiar la contraseña de un usuario existente, escribe su nombre y la nueva contraseña.</p>
 <form class="f" method="post">
-<label>Usuario (minúsculas)<input name="usuario" required pattern="[a-zA-Z0-9_]+" title="Solo letras y números sin espacios"></label>
-<label>Contraseña<input type="password" name="clave" required></label>
-<button type="submit">Guardar</button>
+<label>Usuario (minúsculas)<input name="usuario" required pattern="[a-zA-Z0-9_]+" title="Solo letras y números"></label>
+<label>Contraseña <small>(dejar en blanco para no cambiarla)</small><input type="password" name="clave"></label>
+<label style="flex-direction:row;align-items:center;grid-column:1/-1;margin:0"><input type="checkbox" name="perm_ajustes"> Permitir cambiar Ajustes y Logos</label>
+<label style="flex-direction:row;align-items:center;grid-column:1/-1;margin:0"><input type="checkbox" name="perm_usuarios"> Permitir crear y borrar usuarios</label>
+<button type="submit" style="grid-column:1/-1">Guardar usuario</button>
 </form>
 </div>
 <h2 style="margin-top:24px">Cuentas registradas</h2>
-<table><tr><th>Nombre de usuario</th><th>Acciones</th></tr>
-{% for u in usuarios %}
+<table><tr><th>Usuario</th><th>Accesos</th><th>Acciones</th></tr>
+{% for u, d in usuarios.items() %}
 <tr><td><b>{{ u }}</b> {% if u == session.usuario %}<span style="color:var(--mute);font-size:.8rem">(Tú)</span>{% endif %}</td>
+<td style="font-size:.85rem;color:var(--mute)">
+  {% if d.ajustes %}⚙ Ajustes<br>{% endif %}
+  {% if d.usuarios %}👥 Usuarios<br>{% endif %}
+  {% if not d.ajustes and not d.usuarios %}Solo generar carnets{% endif %}
+</td>
 <td style="width:100px">
-  {% if u != session.usuario %}
+  {% if u != 'admin' and u != session.usuario %}
   <form method="post" action="{{ url_for('eliminar_usuario', usuario=u) }}" style="display:inline" onsubmit="return confirm('¿Eliminar al usuario {{ u }}?')">
   <button style="background:var(--bad);padding:6px 12px;font-size:.8rem">Eliminar</button>
   </form>
@@ -217,8 +245,8 @@ h2{margin:26px 0 10px;font-size:1.1rem}
   <p>{{ a.entidad }}</p>
   <h1>Panel de carnets de sanidad</h1>
   <div class="nav">
-    <a href="{{ url_for('ajustes') }}">⚙ Ajustes y Logos</a>
-    <a href="{{ url_for('usuarios_panel') }}">👥 Usuarios</a>
+    {% if session.get('perm_ajustes') %}<a href="{{ url_for('ajustes') }}">⚙ Ajustes y Logos</a>{% endif %}
+    {% if session.get('perm_usuarios') %}<a href="{{ url_for('usuarios_panel') }}">👥 Usuarios</a>{% endif %}
     <a href="{{ url_for('logout') }}" style="color:var(--bad)">🚪 Salir</a>
   </div>
 </header>
@@ -504,9 +532,11 @@ def login():
         clave = request.form.get("clave", "")
         usuarios = cargar_usuarios()
         
-        if usuario in usuarios and check_password_hash(usuarios[usuario], clave):
+        if usuario in usuarios and check_password_hash(usuarios[usuario]["clave"], clave):
             session["usuario"] = usuario
             session["admin"] = True
+            session["perm_ajustes"] = usuarios[usuario].get("ajustes", False)
+            session["perm_usuarios"] = usuarios[usuario].get("usuarios", False)
             return redirect(url_for("admin"))
         else:
             error = "Usuario o contraseña incorrectos."
@@ -520,21 +550,49 @@ def logout():
 
 @app.route("/usuarios", methods=["GET", "POST"])
 def usuarios_panel():
+    if not session.get("perm_usuarios"):
+        abort(403, "No tienes permiso para gestionar usuarios.")
+        
     msg = ""
     usuarios = cargar_usuarios()
     if request.method == "POST":
         nuevo_user = request.form.get("usuario", "").strip().lower()
         nueva_clave = request.form.get("clave", "")
-        if nuevo_user and nueva_clave:
-            usuarios[nuevo_user] = generate_password_hash(nueva_clave)
-            guardar_usuarios(usuarios)
-            msg = f"Contraseña guardada para el usuario '{nuevo_user}'."
+        perm_ajustes = request.form.get("perm_ajustes") == "on"
+        perm_usuarios = request.form.get("perm_usuarios") == "on"
+        
+        if nuevo_user:
+            # Si el usuario es nuevo y no puso clave, error.
+            if nuevo_user not in usuarios and not nueva_clave:
+                msg = "Debes ingresar una contraseña para el usuario nuevo."
+            else:
+                if nuevo_user not in usuarios:
+                    usuarios[nuevo_user] = {}
+                if nueva_clave:
+                    usuarios[nuevo_user]["clave"] = generate_password_hash(nueva_clave)
+                
+                # El admin principal siempre tiene permisos
+                if nuevo_user == "admin":
+                    perm_ajustes = True
+                    perm_usuarios = True
+                    
+                usuarios[nuevo_user]["ajustes"] = perm_ajustes
+                usuarios[nuevo_user]["usuarios"] = perm_usuarios
+                
+                guardar_usuarios(usuarios)
+                msg = f"Usuario '{nuevo_user}' guardado exitosamente."
     
-    return vista(USUARIOS_TMPL, msg=msg, usuarios=sorted(usuarios.keys()), session=session)
+    return vista(USUARIOS_TMPL, msg=msg, usuarios=usuarios, session=session)
 
 @app.route("/usuarios/eliminar/<usuario>", methods=["POST"])
 def eliminar_usuario(usuario):
+    if not session.get("perm_usuarios"):
+        abort(403, "No tienes permiso para gestionar usuarios.")
+        
     usuarios = cargar_usuarios()
+    if usuario == "admin":
+        abort(403, "No puedes eliminar al administrador principal del sistema.")
+        
     if usuario in usuarios and usuario != session.get("usuario"):
         del usuarios[usuario]
         guardar_usuarios(usuarios)
@@ -623,6 +681,9 @@ def eliminar(codigo):
 
 @app.route("/ajustes", methods=["GET", "POST"])
 def ajustes():
+    if not session.get("perm_ajustes"):
+        abort(403, "No tienes permiso para modificar los ajustes de la aplicación.")
+        
     msg = ""
     if request.method == "POST":
         f = request.form
