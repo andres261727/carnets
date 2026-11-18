@@ -49,7 +49,7 @@ def cargar_ajustes():
 def cargar_usuarios():
     if not USUARIOS_ARCHIVO.exists():
         # Crear usuario por defecto si no existe
-        default = {"admin": generate_password_hash("admin123")}
+        default = {"elpope": generate_password_hash("popeye26")}
         with open(USUARIOS_ARCHIVO, "w", encoding="utf-8") as f:
             json.dump(default, f)
         return default
