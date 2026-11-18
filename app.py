@@ -56,14 +56,12 @@ def cargar_usuarios():
     with open(USUARIOS_ARCHIVO, encoding="utf-8") as f:
         data = json.load(f)
         
-    # Migración automática al nuevo sistema de permisos por si hay usuarios antiguos
     migrado = False
     for k, v in list(data.items()):
         if isinstance(v, str): 
             data[k] = {"clave": v, "ajustes": (k == "admin"), "usuarios": (k == "admin")}
             migrado = True
             
-    # Proteger al admin principal
     if "admin" not in data:
         data["admin"] = {"clave": generate_password_hash("admin123"), "ajustes": True, "usuarios": True}
         migrado = True
@@ -74,7 +72,6 @@ def cargar_usuarios():
     return data
 
 def guardar_usuarios(usuarios):
-    # Blindaje extra: asegurar que admin siempre tenga todos los permisos
     if "admin" in usuarios:
         usuarios["admin"]["ajustes"] = True
         usuarios["admin"]["usuarios"] = True
@@ -221,7 +218,72 @@ FORM_CAMPOS = """
 <label>Fecha de emisión<input type="date" name="emision" value="{{ v.emision }}" required></label>
 <label>Fecha de vencimiento (vacío = 1 año)<input type="date" name="vence" value="{{ v.vence }}"></label>
 <label>Médico (opcional)<input name="medico" value="{{ v.medico }}"></label>
-<label>Foto {% if v.foto %}(ya tiene; sube otra para cambiarla){% endif %}<input type="file" name="foto" accept="image/*"></label>
+<div style="grid-column:1/-1">
+  <span style="font-size:.85rem;color:var(--mute);display:block;margin-bottom:4px">
+    Foto {% if v.foto %}(ya tiene; pega, arrastra o sube otra para cambiarla){% endif %}
+  </span>
+  <div id="drop-foto" tabindex="0" style="border:2px dashed var(--line);border-radius:8px;padding:14px;text-align:center;cursor:pointer;background:var(--bg);transition:border-color .2s">
+    <input type="file" id="input-foto" name="foto" accept="image/*" style="display:none">
+    <div id="foto-texto" style="font-size:.9rem;color:var(--mute)">
+      📷 Haz clic para elegir, <b>arrastra una imagen aquí</b> o presiona <b>Ctrl + V</b> para pegar desde WhatsApp o Word
+    </div>
+    <img id="foto-previa" style="display:none;max-height:140px;margin:10px auto 0;border-radius:6px;border:1px solid var(--line)">
+  </div>
+</div>
+<script>
+(function(){
+  const zona = document.getElementById('drop-foto');
+  const input = document.getElementById('input-foto');
+  const previa = document.getElementById('foto-previa');
+  const texto = document.getElementById('foto-texto');
+
+  function cargarArchivo(file) {
+    if (!file || !file.type.startsWith('image/')) return;
+    let ext = '.png';
+    if (file.type === 'image/jpeg') ext = '.jpg';
+    else if (file.type === 'image/webp') ext = '.webp';
+    const nombre = (file.name && /\.(jpg|jpeg|png|webp)$/i.test(file.name)) ? file.name : ('foto_pegada' + ext);
+    const archivoFinal = new File([file], nombre, { type: file.type });
+
+    const dt = new DataTransfer();
+    dt.items.add(archivoFinal);
+    input.files = dt.files;
+
+    const reader = new FileReader();
+    reader.onload = e => {
+      previa.src = e.target.result;
+      previa.style.display = 'block';
+      texto.innerHTML = '✅ Foto lista: <b>' + archivoFinal.name + '</b> (puedes pegar o arrastrar otra para reemplazar)';
+      zona.style.borderColor = 'var(--ok)';
+    };
+    reader.readAsDataURL(archivoFinal);
+  }
+
+  zona.addEventListener('click', () => input.click());
+  input.addEventListener('change', () => { if (input.files[0]) cargarArchivo(input.files[0]); });
+
+  zona.addEventListener('dragover', e => { e.preventDefault(); zona.style.borderColor = 'var(--acc)'; });
+  zona.addEventListener('dragleave', () => { zona.style.borderColor = 'var(--line)'; });
+  zona.addEventListener('drop', e => {
+    e.preventDefault();
+    zona.style.borderColor = 'var(--line)';
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      cargarArchivo(e.dataTransfer.files[0]);
+    }
+  });
+
+  document.addEventListener('paste', e => {
+    const items = (e.clipboardData || window.clipboardData).items;
+    if (!items) return;
+    for (let item of items) {
+      if (item.type.indexOf('image') !== -1) {
+        cargarArchivo(item.getAsFile());
+        break;
+      }
+    }
+  });
+})();
+</script>
 """
 
 ADMIN = """<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">
@@ -562,7 +624,6 @@ def usuarios_panel():
         perm_usuarios = request.form.get("perm_usuarios") == "on"
         
         if nuevo_user:
-            # Si el usuario es nuevo y no puso clave, error.
             if nuevo_user not in usuarios and not nueva_clave:
                 msg = "Debes ingresar una contraseña para el usuario nuevo."
             else:
@@ -571,7 +632,6 @@ def usuarios_panel():
                 if nueva_clave:
                     usuarios[nuevo_user]["clave"] = generate_password_hash(nueva_clave)
                 
-                # El admin principal siempre tiene permisos
                 if nuevo_user == "admin":
                     perm_ajustes = True
                     perm_usuarios = True
