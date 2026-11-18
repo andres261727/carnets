@@ -13,12 +13,15 @@ from flask import (Flask, Response, abort, redirect, render_template_string,
                    request, send_from_directory, session, url_for)
 
 BASE = Path(__file__).parent
-ARCHIVO = BASE / "carnets.json"
-FOTOS = BASE / "fotos"
+DATOS = BASE / "datos"
+DATOS.mkdir(exist_ok=True)
+
+ARCHIVO = DATOS / "carnets.json"
+FOTOS = DATOS / "fotos"
 FOTOS.mkdir(exist_ok=True)
-LOGO = BASE / "logo.png"
-FIRMA = BASE / "firma.png"
-AJUSTES_ARCHIVO = BASE / "ajustes.json"
+LOGO = DATOS / "logo.png"
+FIRMA = DATOS / "firma.png"
+AJUSTES_ARCHIVO = DATOS / "ajustes.json"
 
 # Contraseña del panel. Cámbiala aquí o con la variable de entorno ADMIN_PASSWORD.
 ADMIN_USER = os.environ.get("ADMIN_USER", "Elpope")
@@ -655,7 +658,7 @@ def qr_png(codigo):
 def logo():
     if not LOGO.exists():
         abort(404)
-    return send_from_directory(BASE, "logo.png")
+    return send_from_directory(DATOS, "logo.png")
 
 
 @app.route("/fotos/<nombre>")
